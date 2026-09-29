@@ -1,0 +1,17 @@
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<div class="container">
+  <h2>Registro - Paso 2</h2>
+  <form method="post">
+    <label>Nombre completo:</label>
+    <input type="text" name="full_name" value="{{ fullname }}" class="readonly-field" readonly>
+    <label>Correo electrónico:</label>
+    <input type="email" name="email" value="{{ email }}" class="readonly-field" readonly>
+    <label>DNI:</label>
+    <input type="text" name="dni" required>
+    <label>Teléfono:</label>
+    <input type="text" name="phone" required>
+    <label>Contraseña:</label>
+    <input type="password" name="password" required>
+    <button type="submit">Continuar</button>
+  </form>
+</div>

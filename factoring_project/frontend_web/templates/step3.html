@@ -1,0 +1,32 @@
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<div class="container">
+  <h2>Registro - Paso 3</h2>
+  <ul>
+    {% for key, value in data.items() %}
+      <li>
+        {{ key }}:
+        {% if key == 'password_hash' %}
+          ***
+        {% else %}
+          {{ value }}
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+
+  {% if registration_error %}
+    <p class="error">{{ registration_error }}</p>
+  {% endif %}
+
+  {% if registered %}
+    <h3>Configura Google Authenticator</h3>
+    <p>Escanea este código QR en tu aplicación:</p>
+    <img src="data:image/png;base64,{{ qr_code }}" alt="QR Code">
+    <p class="success">Respuesta del backend: {{ backend_response }}</p>
+  {% else %}
+    <form method="post">
+      <button type="submit" name="action" value="back" class="button-back">Regresar</button>
+      <button type="submit" name="action" value="register">Registrar</button>
+    </form>
+  {% endif %}
+</div>

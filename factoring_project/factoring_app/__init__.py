@@ -1,0 +1,1 @@
+# Marca factoring_app como paquete Python

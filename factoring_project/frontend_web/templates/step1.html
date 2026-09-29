@@ -1,0 +1,6 @@
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<div class="container">
+  <h2>Registro - Paso 1</h2>
+  <a href="{{ url_for('login', provider='google') }}"><button>Login con Google</button></a>
+  <a href="{{ url_for('login', provider='facebook') }}"><button>Login con Facebook</button></a>
+</div>

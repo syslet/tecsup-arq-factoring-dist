@@ -1,0 +1,10 @@
+{
+  "description": "Facilitates secure user access and registration for a factoring service platform, enabling businesses to manage financial transactions efficiently.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

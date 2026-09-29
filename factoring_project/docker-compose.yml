@@ -1,0 +1,297 @@
+services:
+  # --- Bases de datos por caso de uso ---
+  registro_db:
+    image: postgres:14
+    container_name: registro_db
+    restart: always
+    environment:
+      POSTGRES_USER: factoring_user
+      POSTGRES_PASSWORD: factoring_pass
+      POSTGRES_DB: registro_db
+    ports:
+      - "5433:5432"
+    volumes:
+      - registro_data:/var/lib/postgresql/data
+      - ./init-scripts/registro:/docker-entrypoint-initdb.d
+
+  venta_db:
+    image: postgres:14
+    container_name: venta_db
+    restart: always
+    environment:
+      POSTGRES_USER: factoring_user
+      POSTGRES_PASSWORD: factoring_pass
+      POSTGRES_DB: venta_db
+    ports:
+      - "5434:5432"
+    volumes:
+      - venta_data:/var/lib/postgresql/data
+      - ./init-scripts/venta:/docker-entrypoint-initdb.d
+
+  desembolso_db:
+    image: postgres:14
+    container_name: desembolso_db
+    restart: always
+    environment:
+      POSTGRES_USER: factoring_user
+      POSTGRES_PASSWORD: factoring_pass
+      POSTGRES_DB: desembolso_db
+    ports:
+      - "5435:5432"
+    volumes:
+      - desembolso_data:/var/lib/postgresql/data
+      - ./init-scripts/desembolso:/docker-entrypoint-initdb.d
+
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: pgadmin_factoring
+    restart: always
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@example.com
+      PGADMIN_DEFAULT_PASSWORD: admin123
+    ports:
+      - "8080:80"
+    depends_on:
+      - registro_db
+      - venta_db
+      - desembolso_db
+
+  # --- Aplicaciones Flask por caso de uso ---
+  registro_app:
+    build:
+      context: .
+      dockerfile: factoring_app/Dockerfile
+    container_name: registro_app
+    restart: always
+    environment:
+      FLASK_ENV: development
+      REGISTRO_DATABASE_URL: postgresql+psycopg2://factoring_user:factoring_pass@registro_db:5432/registro_db
+      VENTA_DATABASE_URL: postgresql+psycopg2://factoring_user:factoring_pass@venta_db:5432/venta_db
+      DESEMBOLSO_DATABASE_URL: postgresql+psycopg2://factoring_user:factoring_pass@desembolso_db:5432/desembolso_db
+    command: ["python", "-m", "factoring_app.registro_main"]
+    ports:
+      - "5001:5001"
+    depends_on:
+      - registro_db
+      - sunat_service
+
+  venta_app:
+    build:
+      context: .
+      dockerfile: factoring_app/Dockerfile
+    container_name: venta_app
+    restart: always
+    command: ["python", "-m", "factoring_app.venta_main"]
+    environment:
+      FLASK_ENV: development
+      REGISTRO_DATABASE_URL: postgresql+psycopg2://factoring_user:factoring_pass@registro_db:5432/registro_db
+      VENTA_DATABASE_URL: postgresql+psycopg2://factoring_user:factoring_pass@venta_db:5432/venta_db
+      DESEMBOLSO_DATABASE_URL: postgresql+psycopg2://factoring_user:factoring_pass@desembolso_db:5432/desembolso_db
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USER: factoring_user
+      RABBITMQ_PASS: factoring_pass
+      RABBITMQ_QUEUE: pricing_queue
+    ports:
+      - "5002:5002"
+    depends_on:
+      - venta_db
+      - pricing_rabbitmq_adapter
+      - rabbitmq
+
+  desembolso_app:
+    build:
+      context: .
+      dockerfile: factoring_app/Dockerfile
+    container_name: desembolso_app
+    restart: always
+    command: ["python", "-m", "factoring_app.desembolso_main"]
+    environment:
+      FLASK_ENV: development
+      REGISTRO_DATABASE_URL: postgresql+psycopg2://factoring_user:factoring_pass@registro_db:5432/registro_db
+      VENTA_DATABASE_URL: postgresql+psycopg2://factoring_user:factoring_pass@venta_db:5432/venta_db
+      DESEMBOLSO_DATABASE_URL: postgresql+psycopg2://factoring_user:factoring_pass@desembolso_db:5432/desembolso_db
+    ports:
+      - "5003:5003"
+    depends_on:
+      - desembolso_db
+      - sunat_service
+      - bank_service
+      - notification_kafka_adapter
+
+  # --- Servicios externos ---
+  sunat_service:
+    build:
+      context: .
+      dockerfile: sunat_adapter/Dockerfile
+    container_name: sunat_service
+    restart: always
+    ports:
+      - "6000:6000"
+
+  bank_service:
+    build:
+      context: .
+      dockerfile: bank_adapter/Dockerfile
+    container_name: bank_service
+    restart: always
+    ports:
+      - "6300:6300"
+
+  # --- RabbitMQ ---
+  rabbitmq:
+    image: rabbitmq:3-management
+    environment:
+      RABBITMQ_DEFAULT_USER: factoring_user
+      RABBITMQ_DEFAULT_PASS: factoring_pass
+    container_name: rabbitmq
+    restart: always
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pricing_rabbitmq_adapter:
+    build:
+      context: .
+      dockerfile: pricing_rabbitmq_adapter/Dockerfile
+    container_name: pricing_rabbitmq_adapter
+    restart: always
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USER: factoring_user
+      RABBITMQ_PASS: factoring_pass
+      RABBITMQ_QUEUE: pricing_queue
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "6400:6400"
+
+  pricing_publisher_adapter:
+    build:
+      context: .
+      dockerfile: pricing_publisher_adapter/Dockerfile
+    container_name: pricing_publisher_adapter
+    restart: always
+    environment:
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_USER: factoring_user
+      RABBITMQ_PASS: factoring_pass
+      RABBITMQ_QUEUE: pricing_queue
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    ports:
+      - "6410:6410"
+
+  # --- Kafka + Zookeeper ---
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.6.0
+    container_name: zookeeper
+    restart: always
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: kafka
+    restart: always
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENERS: PLAINTEXT://:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    ports:
+      - "9092:9092"
+    depends_on:
+      - zookeeper
+
+  # --- Kafka UI opcional ---
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    restart: always
+    depends_on:
+      - kafka
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+    ports:
+      - "8081:8080"
+
+  notification_kafka_adapter:
+    build:
+      context: .
+      dockerfile: notification_kafka_adapter/Dockerfile
+    container_name: notification_kafka_adapter
+    restart: always
+    environment:
+      KAFKA_BROKER: kafka:9092
+      KAFKA_TOPIC: notifications
+    depends_on:
+      - kafka
+    ports:
+      - "6500:6500"
+
+  # --- Frontend Web ---
+  factoring_web:
+    build:
+      context: ./factoring_web
+      dockerfile: Dockerfile
+    container_name: factoring_web
+    restart: always
+    ports:
+      - "7001:80"
+    depends_on:
+      - frontend_web
+
+  frontend_web:
+    build:
+      context: ./frontend_web
+      dockerfile: Dockerfile
+    container_name: frontend_web
+    restart: always
+    ports:
+      - "7000:7000"
+    environment:
+      SECRET_KEY: &password_encryption_secret "0ad4fda079558266065d3695c8512a06f814d9fb92e9c9bd8f9f0c8d3c29f602"
+      REGISTRO_APP_URL: "http://registro_app:5001"
+      SECURITY_ADAPTER_URL: "http://security_adapter:6600"
+      VENTA_APP_URL: "http://venta_app:5002"
+      GOOGLE_CLIENT_ID: "GOOGLE_CLIENT_ID"
+      GOOGLE_CLIENT_SECRET: "GOOGLE_CLIENT_SECRET"
+      FACEBOOK_CLIENT_ID: "FACEBOOK_CLIENT_ID"
+      FACEBOOK_CLIENT_SECRET: "FACEBOOK_CLIENT_SECRET"    
+      FRONTEND_ORIGIN: "http://localhost:7001"
+    depends_on:
+      - registro_app
+      - security_adapter
+      - venta_app
+
+  security_adapter:
+    build:
+      context: .
+      dockerfile: security_adapter/Dockerfile
+    container_name: security_adapter
+    restart: always
+    environment:
+      REGISTRO_DATABASE_URL: "postgresql://factoring_user:factoring_pass@registro_db:5432/registro_db"
+      SECRET_KEY: *password_encryption_secret
+    ports:
+      - "6600:6600"
+    depends_on:
+      - registro_db
+
+volumes:
+  registro_data:
+  venta_data:
+  desembolso_data:

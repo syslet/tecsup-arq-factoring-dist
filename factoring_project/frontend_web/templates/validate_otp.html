@@ -1,0 +1,18 @@
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<div class="container">
+  <h2>Validación OTP - Google Authenticator</h2>
+  <form method="post">
+    <label for="otp_code">Ingrese el código de 6 dígitos:</label>
+    <input type="text" id="otp_code" name="otp_code" maxlength="6" required>
+    <button type="submit">Validar</button>
+  </form>
+
+  {% if message %}
+    <p class="{% if '✅' in message %}success{% else %}error{% endif %}">{{ message }}</p>
+  {% endif %}
+
+  {% if guid %}
+    <p>GUID de autenticación: <strong>{{ guid }}</strong></p>
+  {% endif %}
+</div>
+

@@ -1,0 +1,11 @@
+# Librerías de testing
+pytest==7.4.0
+requests==2.31.0
+
+# Opcional: medir cobertura de tests
+coverage==7.2.7
+
+# Opcional: utilidades de mocking
+pytest-mock==3.11.1
+
+SQLAlchemy==2.0.21

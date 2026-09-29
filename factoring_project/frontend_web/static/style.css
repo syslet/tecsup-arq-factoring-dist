@@ -1,0 +1,110 @@
+/* Reset básico */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+/* Fondo y tipografía */
+body {
+    font-family: 'Segoe UI', Arial, sans-serif;
+    background: linear-gradient(135deg, #f0f4f8, #dfe6e9);
+    color: #2c3e50;
+    min-height: 100vh;
+}
+
+/* Contenedor principal */
+.container {
+    max-width: 700px;
+    margin: 50px auto;
+    background: #fff;
+    padding: 30px;
+    border-radius: 12px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.1);
+}
+
+/* Encabezados */
+h2, h3 {
+    text-align: center;
+    margin-bottom: 20px;
+    color: #34495e;
+}
+
+/* Listas */
+ul {
+    list-style: none;
+    margin: 20px 0;
+}
+ul li {
+    background: #ecf0f1;
+    padding: 12px;
+    margin-bottom: 8px;
+    border-radius: 6px;
+}
+
+/* Formularios */
+form {
+    text-align: center;
+    margin-top: 20px;
+}
+label {
+    display: block;
+    margin: 10px 0 5px;
+    font-weight: bold;
+}
+input[type="text"], input[type="password"] {
+    width: 80%;
+    padding: 10px;
+    border: 1px solid #bdc3c7;
+    border-radius: 6px;
+    margin-bottom: 15px;
+}
+
+.readonly-field {
+    background-color: #ecf0f1;
+    color: #7f8c8d;
+}
+
+/* Botones */
+button {
+    background: #3498db;
+    color: #fff;
+    border: none;
+    padding: 12px 20px;
+    margin: 5px;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: background 0.3s ease;
+}
+button:hover {
+    background: #2980b9;
+}
+
+.button-back {
+    background: #7f8c8d;
+}
+
+.button-back:hover {
+    background: #616a6b;
+}
+
+/* Mensajes */
+.success {
+    color: #27ae60;
+    font-weight: bold;
+    text-align: center;
+}
+.error {
+    color: #c0392b;
+    font-weight: bold;
+    text-align: center;
+}
+
+/* QR */
+img {
+    display: block;
+    margin: 20px auto;
+    border: 3px solid #ddd;
+    border-radius: 10px;
+    max-width: 250px;
+}
