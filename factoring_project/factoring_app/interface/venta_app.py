@@ -2,7 +2,10 @@ from datetime import datetime
 
 from flask import Flask, jsonify, request
 
-from factoring_app.application.venta_use_cases import ConsultarPlanillaUseCase
+from factoring_app.application.venta_use_cases import (
+    ConsultarPlanillaUseCase,
+    ImportarPlanillaUseCase,
+)
 from factoring_app.domain.entities import Invoice, InvoiceSheet
 from factoring_app.infrastructure.db_config import VentaSessionLocal, init_venta_db
 from pricing_rabbitmq_adapter.pricing_rabbitmq_service import get_latest_pricing
@@ -68,6 +71,28 @@ def create_app(initialize_database: bool = False) -> Flask:
             raise
         finally:
             db.close()
+
+    @app.post("/venta/planilla/importar")
+    def importar_planilla():
+        company_id_param = request.args.get("companyId")
+        if company_id_param is None:
+            return jsonify({"error": "El parámetro companyId es obligatorio."}), 400
+        try:
+            company_id = int(company_id_param)
+        except ValueError:
+            return jsonify({"error": "El parámetro companyId debe ser un entero."}), 400
+        if company_id <= 0:
+            return jsonify({"error": "El parámetro companyId debe ser mayor que cero."}), 400
+
+        planillas = request.get_json(silent=True)
+        if not isinstance(planillas, list):
+            return jsonify({"error": "El BODY debe ser un arreglo de planillas."}), 400
+
+        try:
+            resultados = ImportarPlanillaUseCase().ejecutar(company_id, planillas)
+        except ValueError as error:
+            return jsonify({"error": str(error)}), 400
+        return jsonify(resultados), 200
 
     @app.get("/venta/planillas")
     def consultar_planillas():

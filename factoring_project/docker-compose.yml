@@ -267,15 +267,19 @@ services:
       REGISTRO_APP_URL: "http://registro_app:5001"
       SECURITY_ADAPTER_URL: "http://security_adapter:6600"
       VENTA_APP_URL: "http://venta_app:5002"
+      PRICING_SERVICE_URL: "http://pricing_rabbitmq_adapter:6400"
+      DESEMBOLSO_APP_URL: "http://desembolso_app:5003"
       GOOGLE_CLIENT_ID: "GOOGLE_CLIENT_ID"
       GOOGLE_CLIENT_SECRET: "GOOGLE_CLIENT_SECRET"
       FACEBOOK_CLIENT_ID: "FACEBOOK_CLIENT_ID"
-      FACEBOOK_CLIENT_SECRET: "FACEBOOK_CLIENT_SECRET"    
+      FACEBOOK_CLIENT_SECRET: "FACEBOOK_CLIENT_SECRET"
       FRONTEND_ORIGIN: "http://localhost:7001"
     depends_on:
       - registro_app
       - security_adapter
       - venta_app
+      - pricing_rabbitmq_adapter
+      - desembolso_app
 
   security_adapter:
     build:

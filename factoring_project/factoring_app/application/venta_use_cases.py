@@ -1,6 +1,102 @@
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
+from typing import Any
+
 from factoring_app.domain.entities import InvoiceSheet, Sale, Invoice
 from factoring_app.infrastructure.db_config import VentaSessionLocal
 from pricing_rabbitmq_adapter.pricing_rabbitmq_service import get_latest_pricing
+
+
+class ImportarPlanillaUseCase:
+    def ejecutar(self, company_id: int, planillas: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not planillas:
+            raise ValueError("El BODY debe contener al menos una planilla.")
+
+        db = VentaSessionLocal()
+        try:
+            resultados = []
+            today = date.today()
+
+            for planilla_data in planillas:
+                if not isinstance(planilla_data, dict):
+                    raise ValueError("Cada elemento debe ser una planilla.")
+
+                sheet_code = planilla_data.get("numero_planilla")
+                invoice_data_list = planilla_data.get("facturas")
+                if not sheet_code or not isinstance(invoice_data_list, list) or not invoice_data_list:
+                    raise ValueError(
+                        "Cada planilla debe incluir numero_planilla y al menos una factura."
+                    )
+
+                invoices = []
+                total_amount = Decimal("0")
+                for invoice_data in invoice_data_list:
+                    if not isinstance(invoice_data, dict):
+                        raise ValueError("Cada factura debe ser un objeto.")
+                    try:
+                        amount = Decimal(str(invoice_data["importe"]).replace(",", ""))
+                        issue_date = datetime.strptime(
+                            invoice_data["fech_emision"], "%d/%m/%Y"
+                        ).date()
+                        due_date = datetime.strptime(
+                            invoice_data["fecha_vencimiento"], "%d/%m/%Y"
+                        ).date()
+                        invoice = Invoice(
+                            invoice_number=invoice_data["numero_factura"],
+                            drawer_ruc=invoice_data["ruc_girador"],
+                            debtor_ruc=invoice_data["ruc_aceptante"],
+                            debtor_name=invoice_data["nombre_aceptante"],
+                            amount=float(amount),
+                            currency=invoice_data["moneda"],
+                            issue_date=issue_date,
+                            due_date=due_date,
+                            days_to_maturity=(due_date - today).days,
+                            sunat_status="VALID",
+                            is_approved=True,
+                            rejection_reason="",
+                        )
+                    except (KeyError, InvalidOperation, TypeError, ValueError) as error:
+                        raise ValueError(
+                            "La factura contiene campos faltantes o datos inválidos."
+                        ) from error
+                    if not amount.is_finite():
+                        raise ValueError("El importe de cada factura debe ser válido.")
+
+                    total_amount += amount
+                    invoices.append(invoice)
+
+                sheet = InvoiceSheet(
+                    company_id=company_id,
+                    sheet_code=sheet_code,
+                    currency=invoices[0].currency,
+                    total_amount=float(total_amount),
+                    advance_amount=0,
+                    interest_fee=0,
+                    commission=0,
+                    net_disbursement=0,
+                    advance_rate=0,
+                    monthly_rate=0,
+                    status="REGISTRADO",
+                    created_at=datetime.now(),
+                )
+                sheet.invoices.extend(invoices)
+                db.add(sheet)
+                db.flush()
+                resultados.append(
+                    {
+                        "id": sheet.id,
+                        "numero_planilla": sheet_code,
+                        "status": "Planilla registrada con facturas",
+                    }
+                )
+
+            db.commit()
+            return resultados
+        except Exception:
+            db.rollback()
+            raise
+        finally:
+            db.close()
 
 
 class RegistrarPlanillaUseCase:

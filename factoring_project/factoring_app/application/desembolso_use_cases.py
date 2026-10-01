@@ -1,10 +1,108 @@
+from decimal import Decimal, InvalidOperation
+
 import requests
-from factoring_app.domain.entities import Disbursement
-from factoring_app.infrastructure.db_config import DesembolsoSessionLocal
+from factoring_app.domain.entities import Disbursement, InvoiceSheet
+from factoring_app.infrastructure.db_config import (
+    DesembolsoSessionLocal,
+    VentaSessionLocal,
+)
 
 SUNAT_URL = "http://sunat_service:6000"
 BANK_URL = "http://bank_service:6300"
 NOTIF_KAFKA_URL = "http://notification_kafka_adapter:6500/notificar"
+
+
+class EjecutarDesembolsoMasivoUseCase:
+    def __init__(self, venta_db_session=None, desembolso_db_session=None):
+        self.venta_db = venta_db_session or VentaSessionLocal()
+        self.desembolso_db = desembolso_db_session or DesembolsoSessionLocal()
+
+    @staticmethod
+    def _decimal(value, field_name: str) -> Decimal:
+        try:
+            amount = Decimal(str(value).replace(",", ""))
+        except (InvalidOperation, TypeError, ValueError) as error:
+            raise ValueError(f"El campo {field_name} debe ser numérico.") from error
+        if not amount.is_finite():
+            raise ValueError(f"El campo {field_name} debe ser numérico.")
+        return amount
+
+    def ejecutar(self, data: dict) -> list[dict]:
+        try:
+            planillas = data.get("planillas")
+            if not isinstance(planillas, list) or not planillas:
+                raise ValueError("Debe proporcionar al menos una planilla.")
+
+            resultados = []
+            for planilla_data in planillas:
+                if not isinstance(planilla_data, dict):
+                    raise ValueError("Cada planilla debe ser un objeto.")
+
+                try:
+                    sheet_id = int(planilla_data["id_planilla"])
+                    sheet_code = planilla_data["numero_planilla"]
+                    if not isinstance(sheet_code, str) or not sheet_code.strip():
+                        raise ValueError("El numero_planilla debe ser texto.")
+                    amount = self._decimal(planilla_data["importe"], "importe")
+                    discount_rate = self._decimal(
+                        planilla_data["tasa_descuento"], "tasa_descuento"
+                    )
+                    commission_rate = self._decimal(
+                        planilla_data["tasa_comision"], "tasa_comision"
+                    )
+                except (KeyError, TypeError, ValueError) as error:
+                    raise ValueError(
+                        "La planilla contiene campos faltantes o inválidos."
+                    ) from error
+
+                advance_amount = amount * discount_rate
+                commission = amount * commission_rate
+                net_disbursement = (amount - advance_amount - commission)
+                sheet = (
+                    self.venta_db.query(InvoiceSheet)
+                    .filter(InvoiceSheet.id == sheet_id)
+                    .one_or_none()
+                )
+                if sheet is None:
+                    raise ValueError(f"No existe la planilla con ID {sheet_id}.")
+
+                sheet.advance_amount = float(advance_amount)
+                sheet.commission = float(commission)
+                sheet.net_disbursement = float(net_disbursement)
+                sheet.advance_rate = float(discount_rate)
+                sheet.monthly_rate = float(commission_rate)
+                sheet.status = "DESEMBOLSADO"
+
+                disbursement = Disbursement(
+                    sheet_id=sheet_id,
+                    annotation_code=f"ANOT-{sheet_code}",
+                    amount=float(net_disbursement),
+                    currency=data["currency"],
+                    bank_name=data["bank_name"],
+                    bank_account_number=data["bank_account_number"],
+                    cci=data["cci"],
+                )
+                self.desembolso_db.add(disbursement)
+                self.desembolso_db.flush()
+                resultados.append(
+                    {
+                        "disbursement_id": disbursement.id,
+                        "annotation_code": disbursement.annotation_code,
+                        "status": "Planilla Desembolsada",
+                        "disbursement_amount": disbursement.amount,
+                    }
+                )
+
+            self.venta_db.commit()
+            self.desembolso_db.commit()
+            return resultados
+        except Exception:
+            self.venta_db.rollback()
+            self.desembolso_db.rollback()
+            raise
+        finally:
+            self.venta_db.close()
+            self.desembolso_db.close()
 
 
 class EjecutarDesembolsoUseCase:

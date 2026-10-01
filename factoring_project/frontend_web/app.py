@@ -52,6 +52,12 @@ MAX_PASSWORD_HASH_LENGTH = 100
 REGISTRO_APP_URL = os.getenv("REGISTRO_APP_URL", "http://registro_app:5001")
 SECURITY_ADAPTER_URL = os.getenv("SECURITY_ADAPTER_URL", "http://localhost:6600").rstrip("/")
 VENTA_APP_URL = os.getenv("VENTA_APP_URL", "http://localhost:5002").rstrip("/")
+PRICING_SERVICE_URL = os.getenv(
+    "PRICING_SERVICE_URL", "http://localhost:6400"
+).rstrip("/")
+DESEMBOLSO_APP_URL = os.getenv(
+    "DESEMBOLSO_APP_URL", "http://localhost:5003"
+).rstrip("/")
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:7001").rstrip("/")
 SESSION_COOKIE_NAME = "jwt_factoring"
 SESSION_TTL_SECONDS = 10 * 60
@@ -65,6 +71,10 @@ SESSION_PROFILE_FIELDS = (
     "full_name",
     "phone",
     "verification_status",
+    "bank_name",
+    "bank_account_number",
+    "cci",
+    "currency",
 )
 
 
@@ -247,12 +257,10 @@ def has_session_profile(profile):
     )
 
 
-def create_authenticated_session(profile):
+def set_authenticated_session_cookie(response, profile):
     claims = {field: profile[field] for field in SESSION_PROFILE_FIELDS}
     claims["exp"] = int((datetime.now(timezone.utc) + timedelta(seconds=SESSION_TTL_SECONDS)).timestamp())
     encoded_token = jwt.encode({"alg": "HS256"}, claims, SECRET_KEY).decode("ascii")
-
-    response = jsonify({"authenticated": True})
     response.set_cookie(
         SESSION_COOKIE_NAME,
         encoded_token,
@@ -262,6 +270,11 @@ def create_authenticated_session(profile):
         samesite="Lax",
         path="/",
     )
+    return response
+
+
+def create_authenticated_session(profile):
+    response = set_authenticated_session_cookie(jsonify({"authenticated": True}), profile)
     return response, 200
 
 
@@ -360,10 +373,54 @@ def api_auth_session():
     if error_response:
         return error_response
 
-    return jsonify({
+    response = jsonify({
         "full_name": claims["full_name"],
         "company_id": claims["company_id"],
-    }), 200
+        "currency": claims["currency"],
+    })
+    return set_authenticated_session_cookie(response, claims), 200
+
+
+@app.post("/api/security/validotp")
+def api_security_validotp():
+    claims, error_response = get_valid_session_claims()
+    if error_response:
+        return error_response
+
+    data = request.get_json(silent=True)
+    otp_code = data.get("otp_code") if isinstance(data, dict) else None
+    if not isinstance(otp_code, str) or len(otp_code) != 6 or not otp_code.isdigit():
+        return jsonify({"error": "Código inválido. Intente nuevamente."}), 400
+
+    try:
+        response = requests.post(
+            f"{SECURITY_ADAPTER_URL}/security/validotp",
+            json={
+                "totp_secret": claims["verification_status"],
+                "otp_code": otp_code,
+            },
+            timeout=10,
+        )
+    except requests.RequestException:
+        app.logger.exception("No fue posible conectar con security_adapter/validotp")
+        return jsonify({"error": "No fue posible conectar con el servicio de seguridad."}), 503
+
+    try:
+        result = response.json()
+    except ValueError:
+        app.logger.error("security_adapter/validotp devolvió una respuesta no válida")
+        return jsonify({"error": "El servicio de seguridad devolvió una respuesta no válida."}), 502
+
+    if not isinstance(result, dict):
+        app.logger.error("security_adapter/validotp devolvió una respuesta JSON inesperada")
+        return jsonify({"error": "El servicio de seguridad devolvió una respuesta no válida."}), 502
+    if not response.ok:
+        message = result.get("message") or result.get("error")
+        if not isinstance(message, str) or not message:
+            message = "No fue posible validar el código OTP."
+        return jsonify({"error": message}), response.status_code
+
+    return jsonify(result), response.status_code
 
 
 @app.get("/api/venta/planillas")
@@ -405,6 +462,127 @@ def api_venta_planillas():
         return jsonify({"error": "El servicio de venta devolvió una respuesta no válida."}), 502
 
     return jsonify({"planillas": result["planillas"]}), 200
+
+
+@app.post("/api/venta/planilla/importar")
+def api_venta_importar_planillas():
+    claims, error_response = get_valid_session_claims()
+    if error_response:
+        return error_response
+
+    company_id = request.args.get("companyId", type=int)
+    if company_id is None or company_id <= 0:
+        return jsonify({"error": "El parámetro companyId debe ser un entero positivo."}), 400
+    if company_id != claims["company_id"]:
+        return jsonify({"error": "La empresa solicitada no corresponde a la sesión."}), 403
+
+    planillas = request.get_json(silent=True)
+    if not isinstance(planillas, list):
+        return jsonify({"error": "El BODY debe ser un arreglo de planillas."}), 400
+
+    try:
+        venta_response = requests.post(
+            f"{VENTA_APP_URL}/venta/planilla/importar",
+            params={"companyId": company_id},
+            json=planillas,
+            timeout=10,
+        )
+    except requests.RequestException:
+        app.logger.exception("No fue posible importar planillas en venta_app")
+        return jsonify({"error": "No fue posible conectar con el servicio de venta."}), 503
+
+    try:
+        result = venta_response.json()
+    except ValueError:
+        app.logger.error("venta_app devolvió una respuesta no válida al importar planillas")
+        return jsonify({"error": "El servicio de venta devolvió una respuesta no válida."}), 502
+
+    if venta_response.ok and not isinstance(result, list):
+        app.logger.error("venta_app devolvió una respuesta inesperada al importar planillas")
+        return jsonify({"error": "El servicio de venta devolvió una respuesta no válida."}), 502
+    return jsonify(result), venta_response.status_code
+
+
+@app.post("/api/desembolso/masivo")
+def api_desembolso_masivo():
+    claims, error_response = get_valid_session_claims()
+    if error_response:
+        return error_response
+
+    data = request.get_json(silent=True)
+    planillas = data.get("planillas") if isinstance(data, dict) else None
+    if not isinstance(planillas, list) or not planillas:
+        return jsonify({"error": "Debe proporcionar al menos una planilla."}), 400
+
+    payload = {
+        "user_id": claims["user_id"],
+        "company_id": claims["company_id"],
+        "phone": claims["phone"],
+        "bank_name": claims["bank_name"],
+        "bank_account_number": claims["bank_account_number"],
+        "cci": claims["cci"],
+        "currency": claims["currency"],
+        "email": claims["email"],
+        "planillas": planillas,
+    }
+    try:
+        desembolso_response = requests.post(
+            f"{DESEMBOLSO_APP_URL}/desembolso/masivo",
+            json=payload,
+            timeout=10,
+        )
+    except requests.RequestException:
+        app.logger.exception("No fue posible conectar con desembolso_app")
+        return jsonify({"error": "No fue posible conectar con el servicio de desembolso."}), 503
+
+    try:
+        result = desembolso_response.json()
+    except ValueError:
+        app.logger.error("desembolso_app devolvió una respuesta no válida")
+        return jsonify({"error": "El servicio de desembolso devolvió una respuesta no válida."}), 502
+
+    if desembolso_response.ok and not isinstance(result, list):
+        app.logger.error("desembolso_app devolvió una respuesta inesperada")
+        return jsonify({"error": "El servicio de desembolso devolvió una respuesta no válida."}), 502
+    return jsonify(result), desembolso_response.status_code
+
+
+@app.get("/api/pricing/latest")
+def api_pricing_latest():
+    _, error_response = get_valid_session_claims()
+    if error_response:
+        return error_response
+
+    try:
+        pricing_response = requests.get(
+            f"{PRICING_SERVICE_URL}/pricing/latest",
+            timeout=10,
+        )
+    except requests.RequestException:
+        app.logger.exception("No fue posible consultar pricing/latest")
+        return jsonify({"error": "No fue posible conectar con el servicio de pricing."}), 503
+
+    try:
+        result = pricing_response.json()
+    except ValueError:
+        app.logger.error("pricing/latest devolvió una respuesta no válida")
+        return jsonify({"error": "El servicio de pricing devolvió una respuesta no válida."}), 502
+
+    if not isinstance(result, dict):
+        app.logger.error("pricing/latest devolvió una respuesta JSON inesperada")
+        return jsonify({"error": "El servicio de pricing devolvió una respuesta no válida."}), 502
+    if not pricing_response.ok:
+        message = result.get("error") or result.get("message")
+        return jsonify({
+            "error": message if isinstance(message, str) and message else "No fue posible consultar el pricing."
+        }), pricing_response.status_code
+    if "error" in result:
+        message = result["error"]
+        return jsonify({
+            "error": message if isinstance(message, str) and message else "No hay pricing disponible."
+        }), 503
+
+    return jsonify(result), 200
 
 
 @app.route('/')

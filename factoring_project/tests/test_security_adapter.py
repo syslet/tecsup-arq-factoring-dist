@@ -30,6 +30,10 @@ def test_find_user_by_email_consulta_la_empresa_asociada(monkeypatch):
         12,
         "20123456789",
         "Empresa de Ana",
+        "BCP",
+        "001234567890",
+        "00212345678901234567",
+        "PEN",
     )
 
     class Cursor:
@@ -78,6 +82,10 @@ def test_find_user_by_email_consulta_la_empresa_asociada(monkeypatch):
             "company_id",
             "ruc",
             "business_name",
+            "bank_name",
+            "bank_account_number",
+            "cci",
+            "currency",
         ),
         row,
     ))
@@ -103,6 +111,10 @@ def test_validuser_retorna_perfil_si_credenciales_validas(monkeypatch):
             "company_id": 12,
             "ruc": "20123456789",
             "business_name": "Empresa de Ana",
+            "bank_name": "BCP",
+            "bank_account_number": "001234567890",
+            "cci": "00212345678901234567",
+            "currency": "PEN",
         },
     )
 
@@ -123,6 +135,10 @@ def test_validuser_retorna_perfil_si_credenciales_validas(monkeypatch):
         "company_id": 12,
         "ruc": "20123456789",
         "business_name": "Empresa de Ana",
+        "bank_name": "BCP",
+        "bank_account_number": "001234567890",
+        "cci": "00212345678901234567",
+        "currency": "PEN",
     }
 
 
@@ -168,6 +184,10 @@ def test_validemail_retorna_perfil_de_usuario(monkeypatch):
         "company_id": 12,
         "ruc": "20123456789",
         "business_name": "Empresa de Ana",
+        "bank_name": "BCP",
+        "bank_account_number": "001234567890",
+        "cci": "00212345678901234567",
+        "currency": "PEN",
     }
     monkeypatch.setattr(security_service, "find_user_by_email", lambda email: user)
 
@@ -188,6 +208,10 @@ def test_validemail_retorna_perfil_de_usuario(monkeypatch):
         "company_id": 12,
         "ruc": "20123456789",
         "business_name": "Empresa de Ana",
+        "bank_name": "BCP",
+        "bank_account_number": "001234567890",
+        "cci": "00212345678901234567",
+        "currency": "PEN",
     }
 
 

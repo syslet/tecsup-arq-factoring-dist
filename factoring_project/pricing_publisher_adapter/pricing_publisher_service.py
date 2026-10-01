@@ -35,8 +35,8 @@ def publish_pricing_event(event):
 if __name__ == "__main__":
     while True:
         # Generar tasa aleatoria entre 0.02 y 0.15       
-        advance_rate = round(random.uniform(0.02, 0.15), 4)
-        monthly_rate = round(random.uniform(0.01, 0.05), 4)
+        advance_rate = round(random.uniform(0.10, 0.20), 4)
+        monthly_rate = round(random.uniform(0.01, 0.03), 4)
 
         timestamp = datetime.utcnow().isoformat()
 

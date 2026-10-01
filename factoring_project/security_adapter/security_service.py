@@ -29,6 +29,10 @@ PROFILE_FIELDS = (
     "company_id",
     "ruc",
     "business_name",
+    "bank_name",
+    "bank_account_number",
+    "cci",
+    "currency",
 )
 
 
@@ -55,7 +59,11 @@ def find_user_by_email(email: str) -> dict[str, str | int | None] | None:
             users.verification_status,
             companies.id AS company_id,
             companies.ruc,
-            companies.business_name
+            companies.business_name,
+            companies.bank_name,
+            companies.bank_account_number,
+            companies.cci,
+            companies.currency
         FROM users
         JOIN companies
             ON companies.legal_representative_user_id = users.id
@@ -82,6 +90,10 @@ def find_user_by_email(email: str) -> dict[str, str | int | None] | None:
             "company_id",
             "ruc",
             "business_name",
+            "bank_name",
+            "bank_account_number",
+            "cci",
+            "currency",
         ),
         row,
     ))

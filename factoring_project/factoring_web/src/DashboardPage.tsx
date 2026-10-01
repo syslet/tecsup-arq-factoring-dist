@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 type DashboardPageProps = {
   onLogout: () => void
@@ -91,9 +91,42 @@ function formatAmount(amount: number, currency: string): string {
 type InvoiceExcelRow = {
   numeroPlanilla: string
   numeroFactura: string
+  rucGirador: string
+  rucAceptante: string
+  nombreAceptante: string
   importe: number
   moneda: string
+  fechEmision: Date
   fechaVencimiento: Date
+}
+
+type ImportInvoice = {
+  numero_factura: string
+  ruc_girador: string
+  ruc_aceptante: string
+  nombre_aceptante: string
+  importe: string
+  moneda: string
+  fech_emision: string
+  fecha_vencimiento: string
+}
+
+type ImportInvoiceSheet = {
+  numero_planilla: string
+  facturas: ImportInvoice[]
+}
+
+type ImportedInvoiceSheet = {
+  id: number
+  numero_planilla: string
+}
+
+type DisbursementResult = {
+  annotation_code: string
+  disbursement_amount: number
+  disbursement_id: number
+  status: string
+  processed_at: string
 }
 
 type PlanillaSummary = {
@@ -109,7 +142,16 @@ type ExcelSummary = {
   montoPorMoneda: Map<string, number>
   vencimientoPromedio: number
   planillas: PlanillaSummary[]
+  facturas: InvoiceExcelRow[]
 }
+
+type Pricing = {
+  advance_rate: number
+  monthly_rate: number
+  timestamp: string
+}
+
+const PRICING_VALIDITY_SECONDS = 3 * 60
 
 const EXCEL_EPOCH_UTC = Date.UTC(1899, 11, 30)
 const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000
@@ -186,8 +228,12 @@ async function parseInvoiceWorkbook(file: File): Promise<ExcelSummary> {
   const requiredHeaders = [
     'numero_planilla',
     'numero_factura',
+    'ruc_girador',
+    'ruc_aceptante',
+    'nombre_aceptante',
     'importe',
     'moneda',
+    'fech_emision',
     'fecha_vencimiento',
   ]
   const headerIndexes = new Map<string, number>()
@@ -212,17 +258,40 @@ async function parseInvoiceWorkbook(file: File): Promise<ExcelSummary> {
 
     const numeroPlanilla = cellText(row.getCell(column('numero_planilla')).value)
     const numeroFactura = cellText(row.getCell(column('numero_factura')).value)
+    const rucGirador = cellText(row.getCell(column('ruc_girador')).value)
+    const rucAceptante = cellText(row.getCell(column('ruc_aceptante')).value)
+    const nombreAceptante = cellText(row.getCell(column('nombre_aceptante')).value)
     const importeValue = row.getCell(column('importe')).value
     const moneda = cellText(row.getCell(column('moneda')).value)
+    const fechEmisionValue = row.getCell(column('fech_emision')).value
     const fechaVencimientoValue = row.getCell(column('fecha_vencimiento')).value
+    const fechEmision = parseExcelDate(fechEmisionValue)
     const fechaVencimiento = parseExcelDate(fechaVencimientoValue)
 
-    if (!numeroPlanilla && !numeroFactura && !moneda && importeValue == null && fechaVencimientoValue == null) return
+    if (
+      !numeroPlanilla && !numeroFactura && !rucGirador && !rucAceptante &&
+      !nombreAceptante && !moneda && importeValue == null &&
+      fechEmisionValue == null && fechaVencimientoValue == null
+    ) return
     const importe = parseImporte(importeValue)
-    if (!numeroPlanilla || !numeroFactura || !moneda || importe === null || !fechaVencimiento) {
+    if (
+      !numeroPlanilla || !numeroFactura || !rucGirador || !rucAceptante ||
+      !nombreAceptante || !moneda || importe === null || !fechEmision ||
+      !fechaVencimiento
+    ) {
       throw new Error(`La fila ${rowNumber} contiene datos incompletos o inválidos.`)
     }
-    rows.push({ numeroPlanilla, numeroFactura, importe, moneda, fechaVencimiento })
+    rows.push({
+      numeroPlanilla,
+      numeroFactura,
+      rucGirador,
+      rucAceptante,
+      nombreAceptante,
+      importe,
+      moneda,
+      fechEmision,
+      fechaVencimiento,
+    })
   })
 
   if (rows.length === 0) throw new Error('El archivo no contiene facturas para resumir.')
@@ -260,12 +329,178 @@ async function parseInvoiceWorkbook(file: File): Promise<ExcelSummary> {
     montoPorMoneda: totalsByCurrency,
     vencimientoPromedio: Math.round(totalDaysToMaturity / rows.length),
     planillas: [...groups.values()],
+    facturas: rows,
   }
+}
+
+function formatImportAmount(amount: number): string {
+  return new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(amount)
+}
+
+function formatImportDate(date: Date): string {
+  return `${date.getUTCDate()}/${String(date.getUTCMonth() + 1).padStart(2, '0')}/${date.getUTCFullYear()}`
+}
+
+function parsePricing(value: unknown): Pricing {
+  if (isRecord(value) && typeof value.error === 'string' && value.error) {
+    throw new Error(value.error)
+  }
+  if (
+    !isRecord(value) ||
+    value.type !== 'pricing_update' ||
+    typeof value.advance_rate !== 'number' ||
+    !Number.isFinite(value.advance_rate) ||
+    typeof value.monthly_rate !== 'number' ||
+    !Number.isFinite(value.monthly_rate) ||
+    typeof value.timestamp !== 'string'
+  ) {
+    throw new Error('El servicio de pricing devolvió una respuesta no válida.')
+  }
+  return {
+    advance_rate: value.advance_rate,
+    monthly_rate: value.monthly_rate,
+    timestamp: value.timestamp,
+  }
+}
+
+function parseImportedInvoiceSheets(value: unknown): ImportedInvoiceSheet[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error('El servicio de venta devolvió una respuesta no válida.')
+  }
+
+  return value.map((item): ImportedInvoiceSheet => {
+    if (
+      !isRecord(item) ||
+      typeof item.id !== 'number' ||
+      !Number.isInteger(item.id) ||
+      item.id <= 0 ||
+      typeof item.numero_planilla !== 'string' ||
+      !item.numero_planilla
+    ) {
+      throw new Error('El servicio de venta devolvió una planilla con datos no válidos.')
+    }
+    return { id: item.id, numero_planilla: item.numero_planilla }
+  })
+}
+
+function parseDisbursementResults(value: unknown): DisbursementResult[] {
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error('El servicio de desembolso devolvió una respuesta no válida.')
+  }
+
+  const processedAt = new Date().toISOString()
+  return value.map((item): DisbursementResult => {
+    if (
+      !isRecord(item) ||
+      typeof item.annotation_code !== 'string' ||
+      typeof item.disbursement_amount !== 'number' ||
+      !Number.isFinite(item.disbursement_amount) ||
+      typeof item.disbursement_id !== 'number' ||
+      !Number.isInteger(item.disbursement_id) ||
+      typeof item.status !== 'string'
+    ) {
+      throw new Error('El servicio de desembolso devolvió datos no válidos.')
+    }
+    return {
+      annotation_code: item.annotation_code,
+      disbursement_amount: item.disbursement_amount,
+      disbursement_id: item.disbursement_id,
+      status: item.status,
+      processed_at: processedAt,
+    }
+  })
+}
+
+function buildDisbursementPlanillas(
+  invoices: InvoiceExcelRow[],
+  importedSheets: ImportedInvoiceSheet[],
+  pricing: Pricing | null,
+) {
+  if (!pricing) throw new Error('No hay un pricing vigente para ejecutar el desembolso.')
+
+  const importedByCode = new Map(
+    importedSheets.map(sheet => [sheet.numero_planilla, sheet.id]),
+  )
+  const totalsByCode = new Map<string, number>()
+  for (const invoice of invoices) {
+    totalsByCode.set(
+      invoice.numeroPlanilla,
+      (totalsByCode.get(invoice.numeroPlanilla) || 0) + invoice.importe,
+    )
+  }
+
+  return [...totalsByCode.entries()].map(([numeroPlanilla, importe]) => {
+    const id = importedByCode.get(numeroPlanilla)
+    if (id === undefined) {
+      throw new Error(`No se encontró el identificador importado de la planilla ${numeroPlanilla}.`)
+    }
+    return {
+      id_planilla: id,
+      numero_planilla: numeroPlanilla,
+      importe: importe.toFixed(2),
+      tasa_descuento: String(pricing.advance_rate),
+      tasa_comision: String(pricing.monthly_rate),
+    }
+  })
+}
+
+function formatRate(rate: number): string {
+  return `${(rate * 100).toFixed(2)}%`
+}
+
+function formatCountdown(seconds: number): string {
+  const minutes = Math.floor(seconds / 60)
+  const remainingSeconds = seconds % 60
+  return `${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`
+}
+
+function buildImportPayload(rows: InvoiceExcelRow[]): ImportInvoiceSheet[] {
+  const sheets = new Map<string, ImportInvoiceSheet>()
+  for (const row of rows) {
+    let sheet = sheets.get(row.numeroPlanilla)
+    if (!sheet) {
+      sheet = { numero_planilla: row.numeroPlanilla, facturas: [] }
+      sheets.set(row.numeroPlanilla, sheet)
+    }
+    sheet.facturas.push({
+      numero_factura: row.numeroFactura,
+      ruc_girador: row.rucGirador,
+      ruc_aceptante: row.rucAceptante,
+      nombre_aceptante: row.nombreAceptante,
+      importe: formatImportAmount(row.importe),
+      moneda: row.moneda,
+      fech_emision: formatImportDate(row.fechEmision),
+      fecha_vencimiento: formatImportDate(row.fechaVencimiento),
+    })
+  }
+  return [...sheets.values()]
+}
+
+async function responseErrorMessage(response: Response, fallback: string): Promise<string> {
+  try {
+    const result: unknown = await response.json()
+    if (isRecord(result)) {
+      if (typeof result.error === 'string' && result.error) return result.error
+      if (typeof result.message === 'string' && result.message) return result.message
+    }
+  } catch {
+    return fallback
+  }
+  return fallback
 }
 
 function formatCurrencyTotals(totals: Map<string, number>): string {
   return [...totals.entries()]
     .map(([currency, amount]) => formatAmount(amount, currency))
+    .join(' · ')
+}
+
+function formatCurrencyRateTotals(totals: Map<string, number>, rate: number, negative = false): string {
+  return [...totals.entries()]
+    .map(([currency, amount]) => formatAmount(amount * rate * (negative ? -1 : 1), currency))
     .join(' · ')
 }
 
@@ -363,7 +598,7 @@ function Stepper({ current }: { current: number }) {
   )
 }
 
-function WizardContent({ step, fileName, onFileSelect, summary, parsingFile, fileError, otp, setOtp }: {
+function WizardContent({ step, fileName, onFileSelect, summary, parsingFile, fileError, otp, setOtp, pricing, pricingLoading, pricingError, pricingSecondsRemaining, disbursements, currency }: {
   step: number
   fileName: string
   onFileSelect: (file: File | null) => void
@@ -372,6 +607,12 @@ function WizardContent({ step, fileName, onFileSelect, summary, parsingFile, fil
   fileError: string | null
   otp: string
   setOtp: (value: string) => void
+  pricing: Pricing | null
+  pricingLoading: boolean
+  pricingError: string | null
+  pricingSecondsRemaining: number
+  disbursements: DisbursementResult[]
+  currency: string
 }) {
   if (step === 0) {
     return (
@@ -481,17 +722,40 @@ function WizardContent({ step, fileName, onFileSelect, summary, parsingFile, fil
     return (
       <div className="space-y-6">
         <div>
-          <span className="inline-flex items-center gap-2 rounded-full bg-teal-400/10 px-3 py-1 text-xs font-semibold text-teal-600 mb-3"><span className="w-1.5 h-1.5 rounded-full bg-teal-400 animate-pulse" />Pricing disponible</span>
+          <span className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold mb-3 ${pricingError ? 'bg-amber-50 text-amber-700' : 'bg-teal-400/10 text-teal-600'}`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${pricingError ? 'bg-amber-500' : 'bg-teal-400 animate-pulse'}`} />
+            {pricingLoading && !pricing ? 'Consultando pricing…' : pricingError ? 'Pricing no disponible' : 'Pricing disponible'}
+          </span>
           <h2 className="font-display text-2xl font-bold text-navy-900">Tasa de descuento</h2>
-          <p className="text-sm text-slate-500 mt-1">Oferta calculada según el perfil de riesgo y plazo de tus facturas.</p>
+          <p className="text-sm text-slate-500 mt-1">Tasas vigentes para la negociación de tus facturas.</p>
         </div>
         <div className="hero-mesh rounded-2xl p-7 text-white relative overflow-hidden">
-          <div className="relative grid sm:grid-cols-3 gap-6">
-            <div><div className="text-xs text-white/45 uppercase tracking-wider">Tasa mensual</div><div className="font-display text-4xl font-bold mt-2">1.18%</div><div className="text-xs text-teal-400 mt-1">Oferta preferencial</div></div>
-            <div><div className="text-xs text-white/45 uppercase tracking-wider">Plazo promedio</div><div className="font-display text-3xl font-bold mt-2">47 días</div></div>
-            <div><div className="text-xs text-white/45 uppercase tracking-wider">Vigencia</div><div className="font-display text-3xl font-bold mt-2">14:52</div><div className="text-xs text-white/40 mt-1">minutos restantes</div></div>
+          <div className="relative grid sm:grid-cols-2 lg:grid-cols-4 gap-6">
+            <div>
+              <div className="text-xs text-white/45 uppercase tracking-wider">Tasa de Descuento</div>
+              <div className="font-display text-3xl font-bold mt-2">{pricing ? formatRate(pricing.advance_rate) : '—'}</div>
+              <div className="text-xs text-teal-400 mt-1">Pricing vigente</div>
+            </div>
+            <div>
+              <div className="text-xs text-white/45 uppercase tracking-wider">Tasa de Comisión</div>
+              <div className="font-display text-3xl font-bold mt-2">{pricing ? formatRate(pricing.monthly_rate) : '—'}</div>
+            </div>
+            <div>
+              <div className="text-xs text-white/45 uppercase tracking-wider">Plazo promedio</div>
+              <div className="font-display text-3xl font-bold mt-2">{summary?.vencimientoPromedio ?? '—'} días</div>
+            </div>
+            <div>
+              <div className="text-xs text-white/45 uppercase tracking-wider">Vigencia</div>
+              <div className="font-display text-3xl font-bold mt-2">{formatCountdown(pricingSecondsRemaining)}</div>
+              <div className="text-xs text-white/40 mt-1">{pricingLoading ? 'actualizando pricing…' : 'hasta la próxima consulta'}</div>
+            </div>
           </div>
         </div>
+        {pricingError && (
+          <p role="alert" className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+            {pricingError} Se volverá a consultar automáticamente cuando termine el temporizador.
+          </p>
+        )}
         <div className="rounded-xl bg-blue-500/5 border border-blue-500/10 p-4 flex gap-3 text-sm text-blue-700">
           <svg className="w-5 h-5 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="m11.25 11.25.04-.02a.75.75 0 0 1 1.06.85l-.7 2.84a.75.75 0 0 0 1.06.85l.04-.02M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.01v.01H12V8.25Z" /></svg>
           La tasa incluye validación, administración y gestión de cobranza.
@@ -501,6 +765,20 @@ function WizardContent({ step, fileName, onFileSelect, summary, parsingFile, fil
   }
 
   if (step === 4) {
+    const totalAmount = summary ? formatCurrencyTotals(summary.montoPorMoneda) : '—'
+    const discountAmount = summary && pricing
+      ? formatCurrencyRateTotals(summary.montoPorMoneda, pricing.advance_rate, true)
+      : '—'
+    const commissionAmount = summary && pricing
+      ? formatCurrencyRateTotals(summary.montoPorMoneda, pricing.monthly_rate, true)
+      : '—'
+    const netDisbursement = summary && pricing
+      ? formatCurrencyRateTotals(
+        summary.montoPorMoneda,
+        1 - pricing.advance_rate - pricing.monthly_rate,
+      )
+      : '—'
+
     return (
       <div className="space-y-6">
         <div>
@@ -509,16 +787,17 @@ function WizardContent({ step, fileName, onFileSelect, summary, parsingFile, fil
         </div>
         <div className="rounded-2xl border border-slate-100 overflow-hidden">
           {[
-            ['Valor nominal de facturas', 'S/ 284,500.00'],
-            ['Tasa de descuento mensual', '1.18%'],
-            ['Descuento por financiamiento', '− S/ 5,269.72'],
-            ['Comisión operativa', '− S/ 420.00'],
+            ['Valor nominal de facturas', totalAmount],
+            ['Tasa de descuento', pricing ? formatRate(pricing.advance_rate) : '—'],
+            ['Tasa de comisión', pricing ? formatRate(pricing.monthly_rate) : '—'],
+            ['Descuento por financiamiento', discountAmount],
+            ['Comisión operativa', commissionAmount],
           ].map(([label, value]) => (
             <div key={label} className="flex justify-between px-6 py-4 border-b border-slate-100 text-sm"><span className="text-slate-500">{label}</span><span className="font-semibold text-navy-900">{value}</span></div>
           ))}
           <div className="flex justify-between items-end px-6 py-6 bg-navy-900 text-white">
-            <div><div className="text-xs text-white/45 uppercase tracking-wider">Monto a desembolsar</div><div className="text-sm text-white/60 mt-1">Cuenta BCP terminada en 4821</div></div>
-            <div className="font-display text-3xl font-bold">S/ 278,810.28</div>
+            <div><div className="text-xs text-white/45 uppercase tracking-wider">Monto a Desembolsar</div><div className="text-sm text-white/60 mt-1">Cuenta BCP terminada en 4821</div></div>
+            <div className="font-display text-3xl font-bold">{netDisbursement}</div>
           </div>
         </div>
       </div>
@@ -526,34 +805,239 @@ function WizardContent({ step, fileName, onFileSelect, summary, parsingFile, fil
   }
 
   return (
-    <div className="text-center py-3">
-      <div className="relative w-24 h-24 mx-auto">
-        <div className="absolute inset-0 rounded-full bg-teal-400/15 animate-ping" />
-        <div className="relative w-24 h-24 rounded-full bg-gradient-to-br from-teal-400 to-blue-500 flex items-center justify-center shadow-2xl shadow-teal-400/30">
-          <svg className="w-12 h-12 text-white" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+    <div className="space-y-6">
+      <div className="text-center py-3">
+        <div className="relative w-24 h-24 mx-auto">
+          <div className="absolute inset-0 rounded-full bg-teal-400/15 animate-ping" />
+          <div className="relative w-24 h-24 rounded-full bg-gradient-to-br from-teal-400 to-blue-500 flex items-center justify-center shadow-2xl shadow-teal-400/30">
+            <svg className="w-12 h-12 text-white" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="m4.5 12.75 6 6 9-13.5" /></svg>
+          </div>
         </div>
+        <h2 className="font-display text-3xl font-bold text-navy-900 mt-7">Desembolso realizado</h2>
+        <p className="text-slate-500 mt-2 max-w-md mx-auto">La transferencia fue procesada correctamente a la cuenta bancaria registrada del cliente.</p>
       </div>
-      <h2 className="font-display text-3xl font-bold text-navy-900 mt-7">Desembolso realizado</h2>
-      <p className="text-slate-500 mt-2 max-w-md mx-auto">La transferencia fue procesada correctamente a la cuenta bancaria registrada del cliente.</p>
-      <div className="mt-7 max-w-md mx-auto rounded-2xl bg-slate-50 border border-slate-100 p-5 grid grid-cols-2 gap-4 text-left">
-        <div><div className="text-xs text-slate-400">Operación</div><div className="text-sm font-semibold text-navy-900 mt-1">OP-9841026</div></div>
-        <div><div className="text-xs text-slate-400">Monto transferido</div><div className="text-sm font-semibold text-teal-600 mt-1">S/ 278,810.28</div></div>
-        <div><div className="text-xs text-slate-400">Fecha y hora</div><div className="text-sm font-semibold text-navy-900 mt-1">18 Jun, 10:42</div></div>
-        <div><div className="text-xs text-slate-400">Estado</div><div className="text-sm font-semibold text-teal-600 mt-1">Completado</div></div>
+      <div className="overflow-x-auto rounded-2xl border border-slate-100">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-50 text-xs uppercase tracking-wider text-slate-400">
+            <tr>
+              <th className="px-5 py-3 text-left">Operación</th>
+              <th className="px-5 py-3 text-right">Monto Transferido</th>
+              <th className="px-5 py-3 text-left">Fecha y Hora</th>
+              <th className="px-5 py-3 text-left">Estado</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100 text-navy-900">
+            {disbursements.map(result => (
+              <tr key={result.disbursement_id}>
+                <td className="px-5 py-4 font-semibold">{result.annotation_code}</td>
+                <td className="px-5 py-4 text-right font-semibold text-teal-600">
+                  {formatAmount(result.disbursement_amount, currency)}
+                </td>
+                <td className="px-5 py-4 whitespace-nowrap">
+                  {new Date(result.processed_at).toLocaleString('es-PE')}
+                </td>
+                <td className="px-5 py-4">{result.status}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   )
 }
 
-function NegotiationWizard({ onClose }: { onClose: () => void }) {
+function NegotiationWizard({ companyId, currency, onClose, onReturnToDashboard }: {
+  companyId: number
+  currency: string
+  onClose: () => void
+  onReturnToDashboard: () => void
+}) {
   const [step, setStep] = useState(0)
   const [fileName, setFileName] = useState('')
   const [summary, setSummary] = useState<ExcelSummary | null>(null)
+  const [importedSheets, setImportedSheets] = useState<ImportedInvoiceSheet[]>([])
+  const [disbursements, setDisbursements] = useState<DisbursementResult[]>([])
   const [parsingFile, setParsingFile] = useState(false)
   const [fileError, setFileError] = useState<string | null>(null)
   const [otp, setOtp] = useState('')
+  const [apiError, setApiError] = useState<string | null>(null)
+  const [submittingOtp, setSubmittingOtp] = useState(false)
+  const [submittingDisbursement, setSubmittingDisbursement] = useState(false)
+  const [pricing, setPricing] = useState<Pricing | null>(null)
+  const [pricingLoading, setPricingLoading] = useState(false)
+  const [pricingError, setPricingError] = useState<string | null>(null)
+  const [pricingSecondsRemaining, setPricingSecondsRemaining] = useState(PRICING_VALIDITY_SECONDS)
   const parseRequestId = useRef(0)
+  const apiErrorTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const canContinue = step !== 0 || Boolean(summary && !parsingFile && !fileError)
+
+  useEffect(() => () => {
+    if (apiErrorTimer.current) clearTimeout(apiErrorTimer.current)
+  }, [])
+
+  useEffect(() => {
+    if (step !== 3) return
+
+    let active = true
+    let refreshInProgress = false
+    let secondsRemaining = PRICING_VALIDITY_SECONDS
+
+    const fetchPricing = async () => {
+      if (refreshInProgress) return
+      refreshInProgress = true
+      if (active) setPricingLoading(true)
+      try {
+        const response = await fetch('/api/pricing/latest', {
+          credentials: 'same-origin',
+        })
+        if (!response.ok) {
+          throw new Error(await responseErrorMessage(
+            response,
+            'No fue posible consultar el pricing.',
+          ))
+        }
+        const latestPricing = parsePricing(await response.json())
+        if (active) {
+          setPricing(latestPricing)
+          setPricingError(null)
+        }
+      } catch (error) {
+        if (active) {
+          setPricingError(
+            error instanceof Error
+              ? error.message
+              : 'No fue posible consultar el pricing.',
+          )
+        }
+      } finally {
+        refreshInProgress = false
+        secondsRemaining = PRICING_VALIDITY_SECONDS
+        if (active) {
+          setPricingSecondsRemaining(PRICING_VALIDITY_SECONDS)
+          setPricingLoading(false)
+        }
+      }
+    }
+
+    setPricingSecondsRemaining(PRICING_VALIDITY_SECONDS)
+    void fetchPricing()
+    const timer = setInterval(() => {
+      if (refreshInProgress) return
+      secondsRemaining -= 1
+      if (secondsRemaining <= 0) {
+        secondsRemaining = 0
+        setPricingSecondsRemaining(0)
+        void fetchPricing()
+      } else {
+        setPricingSecondsRemaining(secondsRemaining)
+      }
+    }, 1000)
+
+    return () => {
+      active = false
+      clearInterval(timer)
+    }
+  }, [step])
+
+  const showApiError = (message: string) => {
+    if (apiErrorTimer.current) clearTimeout(apiErrorTimer.current)
+    setApiError(message)
+    apiErrorTimer.current = setTimeout(() => {
+      setApiError(null)
+      apiErrorTimer.current = null
+    }, 5000)
+  }
+
+  const validateOtpAndImport = async () => {
+    if (!summary) return
+    setSubmittingOtp(true)
+    setApiError(null)
+    if (apiErrorTimer.current) {
+      clearTimeout(apiErrorTimer.current)
+      apiErrorTimer.current = null
+    }
+    try {
+      const otpResponse = await fetch('/api/security/validotp', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ otp_code: otp }),
+      })
+      if (!otpResponse.ok) {
+        throw new Error(await responseErrorMessage(
+          otpResponse,
+          'No fue posible validar el código OTP. Inténtalo nuevamente.',
+        ))
+      }
+
+      const importResponse = await fetch(
+        `/api/venta/planilla/importar?companyId=${encodeURIComponent(String(companyId))}`,
+        {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(buildImportPayload(summary.facturas)),
+        },
+      )
+      if (!importResponse.ok) {
+        throw new Error(await responseErrorMessage(
+          importResponse,
+          'No fue posible importar las planillas. Inténtalo nuevamente.',
+        ))
+      }
+
+      setImportedSheets(parseImportedInvoiceSheets(await importResponse.json()))
+      setStep(current => current + 1)
+    } catch (error) {
+      showApiError(
+        error instanceof Error
+          ? error.message
+          : 'No fue posible procesar la operación. Inténtalo nuevamente.',
+      )
+    } finally {
+      setSubmittingOtp(false)
+    }
+  }
+
+  const executeDisbursement = async () => {
+    if (!summary) return
+    setSubmittingDisbursement(true)
+    setApiError(null)
+    if (apiErrorTimer.current) {
+      clearTimeout(apiErrorTimer.current)
+      apiErrorTimer.current = null
+    }
+    try {
+      const planillas = buildDisbursementPlanillas(
+        summary.facturas,
+        importedSheets,
+        pricing,
+      )
+      const response = await fetch('/api/desembolso/masivo', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ planillas }),
+      })
+      if (!response.ok) {
+        throw new Error(await responseErrorMessage(
+          response,
+          'No fue posible procesar el desembolso. Inténtalo nuevamente.',
+        ))
+      }
+
+      setDisbursements(parseDisbursementResults(await response.json()))
+      setStep(5)
+    } catch (error) {
+      showApiError(
+        error instanceof Error
+          ? error.message
+          : 'No fue posible procesar el desembolso. Inténtalo nuevamente.',
+      )
+    } finally {
+      setSubmittingDisbursement(false)
+    }
+  }
 
   const handleFileSelect = async (file: File | null) => {
     const requestId = ++parseRequestId.current
@@ -608,6 +1092,11 @@ function NegotiationWizard({ onClose }: { onClose: () => void }) {
           </div>
           <Stepper current={step} />
           <div className="px-6 lg:px-10 py-8 min-h-[27rem]">
+            {apiError && (
+              <div role="alert" className="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {apiError}
+              </div>
+            )}
             <WizardContent
               step={step}
               fileName={fileName}
@@ -617,20 +1106,34 @@ function NegotiationWizard({ onClose }: { onClose: () => void }) {
               fileError={fileError}
               otp={otp}
               setOtp={setOtp}
+              pricing={pricing}
+              pricingLoading={pricingLoading}
+              pricingError={pricingError}
+              pricingSecondsRemaining={pricingSecondsRemaining}
+              disbursements={disbursements}
+              currency={currency}
             />
           </div>
           <div className="flex items-center justify-between px-6 lg:px-10 py-5 border-t border-slate-100 bg-slate-50/70">
             {step === 5 ? <span /> : (
-              <button onClick={step === 0 ? onClose : () => setStep(s => s - 1)} className="flex items-center gap-2 text-sm font-semibold text-slate-500 hover:text-navy-900">
+              <button onClick={step === 0 ? onClose : () => setStep(s => s - 1)} disabled={submittingOtp || submittingDisbursement} className="flex items-center gap-2 text-sm font-semibold text-slate-500 hover:text-navy-900 disabled:opacity-50">
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18" /></svg>
                 {step === 0 ? 'Cancelar' : 'Atrás'}
               </button>
             )}
             {step === 5 ? (
-              <button onClick={onClose} className="btn-primary ml-auto rounded-xl px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-500/20">Ir a Bandeja de Solicitudes</button>
+              <button onClick={onReturnToDashboard} className="btn-primary ml-auto rounded-xl px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-500/20">Ir a Bandeja de Solicitudes</button>
             ) : (
-              <button onClick={() => setStep(s => s + 1)} disabled={!canContinue || (step === 2 && otp.length !== 6)} className="btn-primary inline-flex items-center gap-2 rounded-xl px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-500/20 disabled:opacity-40 disabled:cursor-not-allowed disabled:transform-none">
-                {step === 4 ? 'Desembolsar' : step === 3 ? 'Aceptar tasa' : 'Continuar'}
+              <button
+                onClick={() => step === 2
+                  ? void validateOtpAndImport()
+                  : step === 4
+                    ? void executeDisbursement()
+                    : setStep(s => s + 1)}
+                disabled={!canContinue || (step === 2 && (otp.length !== 6 || submittingOtp)) || (step === 3 && (!pricing || pricingLoading)) || (step === 4 && submittingDisbursement)}
+                className="btn-primary inline-flex items-center gap-2 rounded-xl px-6 py-3 text-sm font-semibold text-white shadow-lg shadow-blue-500/20 disabled:opacity-40 disabled:cursor-not-allowed disabled:transform-none"
+              >
+                {submittingOtp ? 'Validando…' : submittingDisbursement ? 'Desembolsando…' : step === 4 ? 'Desembolsar' : step === 3 ? 'Aceptar tasa' : 'Continuar'}
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" /></svg>
               </button>
             )}
@@ -645,92 +1148,100 @@ export default function DashboardPage({ onLogout }: DashboardPageProps) {
   const [filter, setFilter] = useState('Todos')
   const [wizardOpen, setWizardOpen] = useState(false)
   const [fullName, setFullName] = useState('')
+  const [companyId, setCompanyId] = useState<number | null>(null)
+  const [currency, setCurrency] = useState('PEN')
   const [requests, setRequests] = useState<InvoiceSheet[]>([])
   const [requestsLoading, setRequestsLoading] = useState(true)
   const [requestsError, setRequestsError] = useState<string | null>(null)
   const [sessionChecked, setSessionChecked] = useState(false)
   const [loggingOut, setLoggingOut] = useState(false)
   const [logoutError, setLogoutError] = useState<string | null>(null)
+  const refreshRequestId = useRef(0)
   const statuses = [...new Set(requests.map(row => row.status).filter((status): status is string => Boolean(status)))]
   const visible = filter === 'Todos' ? requests : requests.filter(row => row.status === filter)
 
-  useEffect(() => {
-    let active = true
+  const refreshRequests = useCallback(async () => {
+    const requestId = ++refreshRequestId.current
+    setRequestsLoading(true)
+    setRequestsError(null)
 
-    const validateSession = async () => {
-      let companyId: number
-      try {
-        const response = await fetch('/api/auth/session', {
-          credentials: 'same-origin',
-        })
-        if (!response.ok) {
-          if (active) onLogout()
-          return
-        }
+    try {
+      const sessionResponse = await fetch('/api/auth/session', {
+        credentials: 'same-origin',
+      })
+      if (sessionResponse.status === 401) {
+        if (requestId === refreshRequestId.current) onLogout()
+        return
+      }
+      if (!sessionResponse.ok) {
+        throw new Error('No fue posible validar la sesión. Inténtalo nuevamente.')
+      }
 
-        const result: unknown = await response.json()
-        if (
-          typeof result !== 'object' ||
-          result === null ||
-          !('full_name' in result) ||
-          typeof result.full_name !== 'string' ||
-          !result.full_name.trim() ||
-          !('company_id' in result) ||
-          typeof result.company_id !== 'number' ||
-          !Number.isInteger(result.company_id) ||
-          result.company_id <= 0
-        ) {
-          if (active) onLogout()
-          return
-        }
-
-        companyId = result.company_id
-        if (active) {
-          setFullName(result.full_name)
-          setSessionChecked(true)
-        }
-      } catch {
-        if (active) onLogout()
+      const session: unknown = await sessionResponse.json()
+      if (
+        !isRecord(session) ||
+        typeof session.full_name !== 'string' ||
+        !session.full_name.trim() ||
+        typeof session.company_id !== 'number' ||
+        !Number.isInteger(session.company_id) ||
+        session.company_id <= 0 ||
+        typeof session.currency !== 'string' ||
+        !session.currency
+      ) {
+        if (requestId === refreshRequestId.current) onLogout()
         return
       }
 
-      try {
-        const response = await fetch(
-          `/api/venta/planillas?company_id=${encodeURIComponent(String(companyId))}`,
-          { credentials: 'same-origin' },
-        )
-        if (response.status === 401) {
-          if (active) onLogout()
-          return
-        }
-        if (!response.ok) {
-          throw new Error('No fue posible cargar las planillas. Inténtalo nuevamente.')
-        }
-
-        const result: unknown = await response.json()
-        const planillas = parseInvoiceSheets(result)
-        if (active) {
-          setRequests(planillas)
-          setRequestsError(null)
-        }
-      } catch (error) {
-        if (active) {
-          setRequestsError(
-            error instanceof Error
-              ? error.message
-              : 'No fue posible cargar las planillas. Inténtalo nuevamente.',
-          )
-        }
-      } finally {
-        if (active) setRequestsLoading(false)
+      if (requestId === refreshRequestId.current) {
+        setFullName(session.full_name)
+        setCompanyId(session.company_id)
+        setCurrency(session.currency)
+        setSessionChecked(true)
       }
-    }
 
-    void validateSession()
-    return () => {
-      active = false
+      const response = await fetch(
+        `/api/venta/planillas?company_id=${encodeURIComponent(String(session.company_id))}`,
+        { credentials: 'same-origin' },
+      )
+      if (response.status === 401) {
+        if (requestId === refreshRequestId.current) onLogout()
+        return
+      }
+      if (!response.ok) {
+        throw new Error('No fue posible cargar las planillas. Inténtalo nuevamente.')
+      }
+
+      const result: unknown = await response.json()
+      const planillas = parseInvoiceSheets(result)
+      if (requestId === refreshRequestId.current) {
+        setRequests(planillas)
+        setRequestsError(null)
+      }
+    } catch (error) {
+      if (requestId === refreshRequestId.current) {
+        setRequestsError(
+          error instanceof Error
+            ? error.message
+            : 'No fue posible cargar las planillas. Inténtalo nuevamente.',
+        )
+        setSessionChecked(true)
+      }
+    } finally {
+      if (requestId === refreshRequestId.current) setRequestsLoading(false)
     }
   }, [onLogout])
+
+  useEffect(() => {
+    void refreshRequests()
+    return () => {
+      refreshRequestId.current += 1
+    }
+  }, [refreshRequests])
+
+  const returnToDashboard = () => {
+    setWizardOpen(false)
+    void refreshRequests()
+  }
 
   const logout = async () => {
     setLoggingOut(true)
@@ -866,7 +1377,14 @@ export default function DashboardPage({ onLogout }: DashboardPageProps) {
         </section>
       </main>
 
-      {wizardOpen && <NegotiationWizard onClose={() => setWizardOpen(false)} />}
+      {wizardOpen && companyId !== null && (
+        <NegotiationWizard
+          companyId={companyId}
+          currency={currency}
+          onClose={() => setWizardOpen(false)}
+          onReturnToDashboard={returnToDashboard}
+        />
+      )}
     </div>
   )
 }
